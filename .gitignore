@@ -1,0 +1,13 @@
+# macOS system files
+.DS_Store
+*.dSYM/
+
+# Build directories
+build/
+
+# VSCode settings
+.vscode/
+
+# Compiled binaries
+tetris
+*.o
