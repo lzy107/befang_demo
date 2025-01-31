@@ -1,100 +1,151 @@
-#include <cstdio>
-#include <cstdint>
+#include <stdio.h>
 #include <pthread.h>
+#include <mutex>
+#include <iostream>
 #include <sys/time.h>
 #include <thread>
 #include <chrono>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+
+// 前向声明
+__attribute__((no_instrument_function)) void test_function();
+__attribute__((no_instrument_function)) void test_function2();
+__attribute__((no_instrument_function)) void* thread_func(void*);
+
+// 函数调用记录结构
+struct FunctionRecord {
+    bool is_entry;              // true表示函数进入，false表示函数退出
+    void* func;                 // 函数地址
+    void* caller;               // 调用者地址
+    uint64_t timestamp;         // 时间戳（微秒）
+    uint64_t thread_id;         // 线程ID
+    int depth;                  // 调用栈深度
+    int record_id;              // 记录ID
+};
+
+// 全局变量
+static __thread bool is_active = false;
+static __thread int call_depth = 0;
+static std::mutex g_print_mutex;
+static const int MAX_RECORDS = 10000;
+static FunctionRecord g_records[MAX_RECORDS];
+static int g_record_count = 0;
+static uint64_t g_start_time = 0;
 
 // 获取当前时间戳（微秒）
 __attribute__((no_instrument_function))
 static uint64_t get_timestamp() {
     struct timeval tv;
-    gettimeofday(&tv, nullptr);
-    return static_cast<uint64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec * 1000000ULL + tv.tv_usec;
 }
 
-// 全局计数器和互斥锁
-static size_t g_enter_count = 0;
-static size_t g_exit_count = 0;
-static __thread size_t g_stack_depth = 0;  // 线程局部存储的调用栈深度
-static __thread int g_is_active = 0;  // 线程局部存储的递归保护
-static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t g_print_mutex = PTHREAD_MUTEX_INITIALIZER;  // 用于同步输出
+// 获取线程ID
+__attribute__((no_instrument_function))
+static uint64_t get_thread_id() {
+    pthread_t tid = pthread_self();
+    return (uint64_t)tid;
+}
 
-// 前向声明
-void test_function2();
+// 保存函数调用记录
+__attribute__((no_instrument_function))
+static void save_record(bool is_entry, void* func, void* caller) {
+    int idx = __sync_fetch_and_add(&g_record_count, 1);
+    if (idx < MAX_RECORDS) {
+        g_records[idx].is_entry = is_entry;
+        g_records[idx].func = func;
+        g_records[idx].caller = caller;
+        g_records[idx].timestamp = get_timestamp();
+        g_records[idx].thread_id = get_thread_id();
+        g_records[idx].depth = call_depth;
+        g_records[idx].record_id = idx;
+    }
+}
+
+// 将记录保存到文件
+__attribute__((no_instrument_function))
+static void save_records_to_file(const char* filename) {
+    std::ofstream file(filename);
+    if (!file) {
+        std::cerr << "无法打开文件: " << filename << std::endl;
+        return;
+    }
+
+    // 写入JSON格式的数据
+    file << "{\n";
+    file << "  \"total_time\": " << (get_timestamp() - g_start_time) << ",\n";
+    file << "  \"records\": [\n";
+    
+    int count = g_record_count;
+    if (count > MAX_RECORDS) count = MAX_RECORDS;
+    
+    for (int i = 0; i < count; i++) {
+        if (i > 0) {
+            file << ",\n";
+        }
+        
+        const auto& record = g_records[i];
+        file << "    {\n";
+        file << "      \"type\": \"" << (record.is_entry ? "entry" : "exit") << "\",\n";
+        file << "      \"func\": \"0x" << std::hex << (uint64_t)record.func << "\",\n";
+        file << "      \"caller\": \"0x" << std::hex << (uint64_t)record.caller << "\",\n";
+        file << "      \"timestamp\": " << std::dec << record.timestamp << ",\n";
+        file << "      \"thread_id\": \"0x" << std::hex << record.thread_id << "\",\n";
+        file << "      \"depth\": " << std::dec << record.depth << ",\n";
+        file << "      \"record_id\": " << std::dec << record.record_id;
+        file << "\n    }";
+    }
+    
+    file << "\n  ]\n}\n";
+    file.close();
+    
+    std::cout << "记录已保存到文件: " << filename << std::endl;
+    std::cout << "总共记录了 " << count << " 条记录" << std::endl;
+    std::cout << "总耗时: " << (get_timestamp() - g_start_time) << " 微秒" << std::endl;
+}
+
+extern "C" {
+void __cyg_profile_func_enter(void* this_fn, void* call_site) __attribute__((no_instrument_function));
+void __cyg_profile_func_exit(void* this_fn, void* call_site) __attribute__((no_instrument_function));
+}
+
+void __cyg_profile_func_enter(void* this_fn, void* call_site) {
+    if (is_active) return;
+    is_active = true;
+    
+    if (g_start_time == 0) {
+        g_start_time = get_timestamp();
+    }
+    
+    save_record(true, this_fn, call_site);
+    call_depth++;
+    
+    is_active = false;
+}
+
+void __cyg_profile_func_exit(void* this_fn, void* call_site) {
+    if (is_active) return;
+    is_active = true;
+    
+    call_depth--;
+    save_record(false, this_fn, call_site);
+    
+    is_active = false;
+}
 
 // 测试函数
 __attribute__((no_instrument_function))
 void test_function() {
-    pthread_mutex_lock(&g_print_mutex);
-    fprintf(stderr, "测试函数被调用\n");
-    pthread_mutex_unlock(&g_print_mutex);
+    std::cout << "测试函数被调用" << std::endl;
     test_function2();
 }
 
-// 测试函数2
 __attribute__((no_instrument_function))
 void test_function2() {
-    pthread_mutex_lock(&g_print_mutex);
-    fprintf(stderr, "测试函数2被调用\n");
-    pthread_mutex_unlock(&g_print_mutex);
+    std::cout << "测试函数2被调用" << std::endl;
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-}
-
-// 最简单的函数插桩实现
-extern "C" {
-    void __cyg_profile_func_enter(void *this_fn, void *call_site) __attribute__((no_instrument_function));
-    void __cyg_profile_func_exit(void *this_fn, void *call_site) __attribute__((no_instrument_function));
-}
-
-__attribute__((no_instrument_function))
-static void print_indent(size_t depth) {
-    for (size_t i = 0; i < depth; ++i) {
-        fprintf(stderr, "  ");
-    }
-}
-
-void __cyg_profile_func_enter(void *this_fn, void *call_site) {
-    if (g_is_active) return;  // 防止递归
-    g_is_active = 1;
-    
-    uint64_t timestamp = get_timestamp();
-    size_t depth = g_stack_depth++;
-    pthread_t tid = pthread_self();
-    
-    pthread_mutex_lock(&g_mutex);
-    size_t count = g_enter_count++;
-    pthread_mutex_unlock(&g_mutex);
-    
-    pthread_mutex_lock(&g_print_mutex);
-    print_indent(depth);
-    fprintf(stderr, "函数进入[%zu] 线程=%p 时间=%llu 深度=%zu: 函数地址=%p, 调用点=%p\n", 
-            count, (void*)tid, timestamp, depth, this_fn, call_site);
-    pthread_mutex_unlock(&g_print_mutex);
-    
-    g_is_active = 0;
-}
-
-void __cyg_profile_func_exit(void *this_fn, void *call_site) {
-    if (g_is_active) return;  // 防止递归
-    g_is_active = 1;
-    
-    uint64_t timestamp = get_timestamp();
-    size_t depth = --g_stack_depth;
-    pthread_t tid = pthread_self();
-    
-    pthread_mutex_lock(&g_mutex);
-    size_t count = g_exit_count++;
-    pthread_mutex_unlock(&g_mutex);
-    
-    pthread_mutex_lock(&g_print_mutex);
-    print_indent(depth);
-    fprintf(stderr, "函数退出[%zu] 线程=%p 时间=%llu 深度=%zu: 函数地址=%p, 调用点=%p\n", 
-            count, (void*)tid, timestamp, depth, this_fn, call_site);
-    pthread_mutex_unlock(&g_print_mutex);
-    
-    g_is_active = 0;
 }
 
 // 线程函数
@@ -106,41 +157,24 @@ void* thread_func(void*) {
 
 __attribute__((no_instrument_function))
 int main() {
-    pthread_mutex_lock(&g_print_mutex);
-    fprintf(stderr, "开始测试...\n");
-    void* main_addr = (void*)&main;
-    void* test_addr = (void*)&test_function;
-    void* test2_addr = (void*)&test_function2;
+    std::cout << "开始测试..." << std::endl;
     
-    fprintf(stderr, "main函数地址: %p\n", main_addr);
-    fprintf(stderr, "test_function地址: %p\n", test_addr);
-    fprintf(stderr, "test_function2地址: %p\n", test2_addr);
-    pthread_mutex_unlock(&g_print_mutex);
+    // 打印函数地址
+    printf("main函数地址: %p\n", (void*)main);
+    printf("test_function地址: %p\n", (void*)test_function);
+    printf("test_function2地址: %p\n", (void*)test_function2);
     
-    uint64_t start_time = get_timestamp();
-    
-    // 创建两个线程来测试
+    // 创建两个线程执行测试
     pthread_t thread1, thread2;
-    pthread_create(&thread1, nullptr, thread_func, nullptr);
-    pthread_create(&thread2, nullptr, thread_func, nullptr);
+    pthread_create(&thread1, NULL, thread_func, NULL);
+    pthread_create(&thread2, NULL, thread_func, NULL);
     
-    // 等待线程结束
-    pthread_join(thread1, nullptr);
-    pthread_join(thread2, nullptr);
+    pthread_join(thread1, NULL);
+    pthread_join(thread2, NULL);
     
-    uint64_t end_time = get_timestamp();
+    // 保存记录到文件
+    save_records_to_file("function_trace.json");
     
-    pthread_mutex_lock(&g_mutex);
-    size_t total_enter = g_enter_count;
-    size_t total_exit = g_exit_count;
-    pthread_mutex_unlock(&g_mutex);
-    
-    pthread_mutex_lock(&g_print_mutex);
-    fprintf(stderr, "总共记录了 %zu 次函数进入和 %zu 次函数退出\n", 
-            total_enter, total_exit);
-    fprintf(stderr, "总耗时: %llu 微秒\n", end_time - start_time);
-    fprintf(stderr, "测试完成\n");
-    pthread_mutex_unlock(&g_print_mutex);
-    
+    std::cout << "测试完成" << std::endl;
     return 0;
 }
