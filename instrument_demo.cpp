@@ -10,6 +10,12 @@
 #include <iomanip>
 #include <mach/mach.h>
 #include <mach/thread_info.h>
+#include <dlfcn.h>
+
+// 声明Mach-O头部符号
+extern "C" {
+    extern void* __mh_execute_header;
+}
 
 // 前向声明
 __attribute__((no_instrument_function)) void test_function();
@@ -175,6 +181,24 @@ void* thread_func(void*) {
 __attribute__((no_instrument_function))
 int main() {
     std::cout << "开始测试..." << std::endl;
+    
+    // 获取运行时基地址
+    Dl_info info;
+    if (dladdr((void*)main, &info) != 0) {
+        uint64_t runtime_base = (uint64_t)info.dli_fbase;
+        
+        // 保存基地址到JSON文件
+        std::ofstream base_file("runtime_base.json");
+        if (base_file) {
+            base_file << "{\n";
+            base_file << "  \"runtime_base\": \"0x" << std::hex << runtime_base << "\"\n";
+            base_file << "}\n";
+            base_file.close();
+            std::cout << "运行时基地址: 0x" << std::hex << runtime_base << std::endl;
+        }
+    } else {
+        std::cerr << "无法获取运行时基地址" << std::endl;
+    }
     
     // 打印函数地址
     printf("main函数地址: %p\n", (void*)main);
