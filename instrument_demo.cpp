@@ -8,6 +8,8 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <mach/mach.h>
+#include <mach/thread_info.h>
 
 // 前向声明
 __attribute__((no_instrument_function)) void test_function();
@@ -23,6 +25,7 @@ struct FunctionRecord {
     uint64_t thread_id;         // 线程ID
     int depth;                  // 调用栈深度
     int record_id;              // 记录ID
+    int cpu_usage;             // CPU使用率（0-1000，表示0%-100.0%）
 };
 
 // 全局变量
@@ -49,6 +52,18 @@ static uint64_t get_thread_id() {
     return (uint64_t)tid;
 }
 
+// 获取线程CPU使用率
+__attribute__((no_instrument_function))
+static int get_cpu_usage() {
+    mach_port_t thread = pthread_mach_thread_np(pthread_self());
+    thread_basic_info_data_t info;
+    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+    if (thread_info(thread, THREAD_BASIC_INFO, (thread_info_t)&info, &count) == KERN_SUCCESS) {
+        return info.cpu_usage;  // 返回CPU使用率（0-1000，表示0%-100.0%）
+    }
+    return -1;
+}
+
 // 保存函数调用记录
 __attribute__((no_instrument_function))
 static void save_record(bool is_entry, void* func, void* caller) {
@@ -61,6 +76,7 @@ static void save_record(bool is_entry, void* func, void* caller) {
         g_records[idx].thread_id = get_thread_id();
         g_records[idx].depth = call_depth;
         g_records[idx].record_id = idx;
+        g_records[idx].cpu_usage = get_cpu_usage();
     }
 }
 
@@ -94,6 +110,7 @@ static void save_records_to_file(const char* filename) {
         file << "      \"timestamp\": " << std::dec << record.timestamp << ",\n";
         file << "      \"thread_id\": \"0x" << std::hex << record.thread_id << "\",\n";
         file << "      \"depth\": " << std::dec << record.depth << ",\n";
+        file << "      \"cpu_usage\": " << std::dec << record.cpu_usage << ",\n";
         file << "      \"record_id\": " << std::dec << record.record_id;
         file << "\n    }";
     }
