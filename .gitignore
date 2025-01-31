@@ -10,4 +10,19 @@ build/
 
 # Compiled binaries
 tetris
+instrument_demo
 *.o
+
+# 代码覆盖率文件
+*.gcno
+*.gcda
+*.gcov
+coverage_report/
+coverage.info
+
+# 性能分析文件
+gmon.out
+profile_report.txt
+*.prof
+tetris_profile.pdf
+tetris_flame_graph.svg
